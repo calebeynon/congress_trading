@@ -9,13 +9,15 @@ by the largest single-day change after the local extremum.
 import pandas as pd
 import numpy as np
 import argparse
+from scipy.signal import argrelextrema
 
 # Global constants
 INPUT_PATH = "data/derived/news_sentiment_filtered.csv"
 OUTPUT_PATH = "data/derived/news_sentiment_with_events.csv"
-WINDOW_DAYS = 7
-TOP_K = 5
-REVERSAL_DAYS = 1  # Default: look at 1-day change after extremum
+WINDOW_DAYS = 20
+TOP_K = 1
+REVERSAL_DAYS = 10  # Default: look at 1-day change after extremum
+SMOOTHING_WINDOW = 5  # Default: 5-day moving average for smoothing
 SENTIMENT_COL_CANDIDATES = ["News.Sentiment", "News Sentiment", "sentiment", "News_Sentiment"]
 
 
@@ -72,17 +74,43 @@ def load_data(path):
     return df
 
 
+def smooth_sentiment(df, sentiment_col='sentiment', smoothing_window=SMOOTHING_WINDOW):
+    """
+    Smooth sentiment data using a centered rolling mean to reduce noise.
+    
+    This helps focus on larger sentiment swings rather than daily volatility.
+    
+    Args:
+        df: DataFrame with sentiment data
+        sentiment_col: Name of sentiment column to smooth
+        smoothing_window: Window size for rolling mean (days)
+        
+    Returns:
+        DataFrame with sentiment_smoothed column added
+    """
+    df['sentiment_smoothed'] = df[sentiment_col].rolling(
+        window=smoothing_window,
+        center=True,
+        min_periods=1
+    ).mean()
+    
+    print(f"Applied {smoothing_window}-day centered rolling mean for smoothing")
+    
+    return df
+
+
 def find_local_extrema(df, sentiment_col='sentiment', window=WINDOW_DAYS):
     """
-    Identify local minima and maxima using a rolling window.
+    Identify local minima and maxima using scipy.signal.argrelextrema.
     
-    A point is a local minimum if it's lower than all points within
-    the previous and next 'window' days. Similar logic for maxima.
+    A point is a local minimum if it's the smallest value within a window of
+    neighboring points. A local maximum is identified similarly for peaks.
+    This method is more robust than manual iteration.
     
     Args:
         df: DataFrame with sentiment data
         sentiment_col: Name of sentiment column to analyze
-        window: Number of days on each side for comparison
+        window: Number of days on each side for comparison (order parameter)
         
     Returns:
         DataFrame with is_local_min and is_local_max boolean columns
@@ -90,25 +118,17 @@ def find_local_extrema(df, sentiment_col='sentiment', window=WINDOW_DAYS):
     s = df[sentiment_col].values
     n = len(s)
     
+    # Initialize arrays
     is_local_min = np.zeros(n, dtype=bool)
     is_local_max = np.zeros(n, dtype=bool)
     
-    # Check each point to see if it's a local extremum
-    for i in range(window, n - window):
-        current = s[i]
-        
-        # Get window of values before and after (not including current point)
-        prev_window = s[max(0, i-window):i]
-        next_window = s[i+1:min(n, i+window+1)]
-        
-        # Check if it's a local minimum
-        if len(prev_window) == window and len(next_window) == window:
-            if current < np.min(prev_window) and current < np.min(next_window):
-                is_local_min[i] = True
-            
-            # Check if it's a local maximum
-            if current > np.max(prev_window) and current > np.max(next_window):
-                is_local_max[i] = True
+    # Find local minima using scipy (comparator: less than)
+    min_indices = argrelextrema(s, np.less, order=window)[0]
+    is_local_min[min_indices] = True
+    
+    # Find local maxima using scipy (comparator: greater than)
+    max_indices = argrelextrema(s, np.greater, order=window)[0]
+    is_local_max[max_indices] = True
     
     df['is_local_min'] = is_local_min
     df['is_local_max'] = is_local_max
@@ -260,7 +280,7 @@ def build_output_and_save(df, output_path=OUTPUT_PATH):
     ]
     
     # Drop intermediate working columns
-    cols_to_drop = ['sentiment', 'is_local_min', 'is_local_max', 
+    cols_to_drop = ['sentiment', 'sentiment_smoothed', 'is_local_min', 'is_local_max', 
                     'extremity_score_min', 'extremity_score_max']
     df = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
     
@@ -308,6 +328,13 @@ def parse_arguments():
     )
     
     parser.add_argument(
+        '--smoothing-window',
+        type=int,
+        default=SMOOTHING_WINDOW,
+        help='Window size for rolling mean smoothing (set to 1 to disable)'
+    )
+    
+    parser.add_argument(
         '--input',
         type=str,
         default=INPUT_PATH,
@@ -337,14 +364,18 @@ def main():
     print(f"Configuration:")
     print(f"  Reversal window: {args.reversal_days} days")
     print(f"  Extrema window: {args.window_days} days")
+    print(f"  Smoothing window: {args.smoothing_window} days")
     print(f"  Top K per year: {args.top_k}")
     print("=" * 60)
     
     # Load and prepare data
     df = load_data(args.input)
     
-    # Find local extrema
-    df = find_local_extrema(df, 'sentiment', args.window_days)
+    # Smooth sentiment data to focus on larger swings
+    df = smooth_sentiment(df, 'sentiment', args.smoothing_window)
+    
+    # Find local extrema on smoothed data
+    df = find_local_extrema(df, 'sentiment_smoothed', args.window_days)
     
     # Calculate extremity scores
     df = compute_extremity_scores(df, 'sentiment', args.reversal_days)

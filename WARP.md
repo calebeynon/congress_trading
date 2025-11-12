@@ -250,6 +250,12 @@ Explore differential effects by:
 - **Estimation**: Use fixed effects regression with robust standard errors
 - **Visualization**: Event study plots, parallel trends diagnostics, coefficient plots
 
+### Script Organization
+- **All scripts should go in the `derived` or `analysis` folder**
+- If uncertain which folder to use, ask before creating the script
+- The `derived` folder is for data processing and feature engineering scripts
+- The `analysis` folder is for statistical analysis and modeling scripts
+
 ## References and Background
 - STOCK Act (2012): Required disclosure of congressional trades
 - Prior literature on congressional trading and abnormal returns
