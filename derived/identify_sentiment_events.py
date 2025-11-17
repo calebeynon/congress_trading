@@ -15,9 +15,10 @@ from scipy.signal import argrelextrema
 INPUT_PATH = "data/derived/news_sentiment_filtered.csv"
 OUTPUT_PATH = "data/derived/news_sentiment_with_events.csv"
 WINDOW_DAYS = 20
-TOP_K = 1
+TOP_K = 3
 REVERSAL_DAYS = 10  # Default: look at 1-day change after extremum
 SMOOTHING_WINDOW = 5  # Default: 5-day moving average for smoothing
+MIN_SEPARATION_DAYS = 30  # Minimum days between any two sentiment events
 SENTIMENT_COL_CANDIDATES = ["News.Sentiment", "News Sentiment", "sentiment", "News_Sentiment"]
 
 
@@ -235,6 +236,128 @@ def select_top_events_by_year(df, top_k=TOP_K):
     return df
 
 
+def enforce_minimum_separation(df, min_separation_days=MIN_SEPARATION_DAYS):
+    """
+    Enforce minimum separation between all sentiment events.
+    
+    This function ensures that no two sentiment events (minima or maxima) occur
+    within min_separation_days of each other. When conflicts arise (events closer
+    than min_separation_days), only the event with the highest extremity score
+    is retained. This constraint applies across all dates, including year boundaries.
+    
+    Events exactly min_separation_days apart are allowed (conflict is delta < threshold).
+    The greedy algorithm processes events chronologically and may replace a previously
+    kept event if a more extreme event appears within the separation window.
+    
+    Args:
+        df: DataFrame with local_min, local_max, and extremity_score columns
+        min_separation_days: Minimum number of days between any two events
+        
+    Returns:
+        DataFrame with updated local_min and local_max indicators
+    """
+    if df.empty:
+        print(f"\nMinimum separation enforced ({min_separation_days}d): "
+              f"before=0, after=0, removed=0")
+        return df
+    
+    df = df.copy()
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # Collect all selected events into a unified list
+    events = build_event_list(df)
+    
+    if not events:
+        print(f"\nMinimum separation enforced ({min_separation_days}d): "
+              f"before=0, after=0, removed=0")
+        return df
+    
+    # Sort events chronologically (stable sort for determinism)
+    events.sort(key=lambda e: e['date'])
+    n_before = len(events)
+    
+    # Greedy algorithm: keep events with >= min_separation_days apart
+    # When conflict occurs, keep the more extreme event
+    removed = []
+    last_kept = None
+    
+    for event in events:
+        if last_kept is None:
+            last_kept = event
+            continue
+        
+        delta_days = (event['date'] - last_kept['date']).days
+        
+        if delta_days >= min_separation_days:
+            # No conflict: keep this event
+            last_kept = event
+        else:
+            # Conflict: compare extremity scores
+            if event['score'] > last_kept['score']:
+                # New event is more extreme: remove the previously kept event
+                removed.append(last_kept)
+                last_kept = event
+            else:
+                # Previously kept event is more extreme (or equal): remove current
+                removed.append(event)
+    
+    # Apply removals to DataFrame
+    for event in removed:
+        if event['type'] == 'min':
+            df.at[event['idx'], 'local_min'] = 0
+        else:
+            df.at[event['idx'], 'local_max'] = 0
+    
+    # Print summary
+    n_after = int(df['local_min'].sum() + df['local_max'].sum())
+    n_removed = n_before - n_after
+    n_mins_removed = sum(1 for e in removed if e['type'] == 'min')
+    n_maxs_removed = sum(1 for e in removed if e['type'] == 'max')
+    
+    print(f"\nMinimum separation enforced ({min_separation_days}d):")
+    print(f"  Before: {n_before} events")
+    print(f"  After: {n_after} events")
+    print(f"  Removed: {n_removed} ({n_mins_removed} minima, {n_maxs_removed} maxima)")
+    
+    return df
+
+
+def build_event_list(df):
+    """
+    Build a list of all selected sentiment events from DataFrame.
+    
+    Each event is represented as a dictionary with index, date, type, and score.
+    Minima and maxima are treated as separate events even if on the same date.
+    
+    Args:
+        df: DataFrame with local_min, local_max, and extremity_score columns
+        
+    Returns:
+        List of event dictionaries
+    """
+    events = []
+    
+    # Collect minima
+    for idx, row in df[df['local_min'] == 1].iterrows():
+        events.append({
+            'idx': idx,
+            'date': row['date'],
+            'type': 'min',
+            'score': row['extremity_score_min']
+        })
+    
+    # Collect maxima
+    for idx, row in df[df['local_max'] == 1].iterrows():
+        events.append({
+            'idx': idx,
+            'date': row['date'],
+            'type': 'max',
+            'score': row['extremity_score_max']
+        })
+    
+    return events
+
+
 def validate_results(df, top_k=TOP_K):
     """
     Validate that the results meet expected criteria.
@@ -382,6 +505,9 @@ def main():
     
     # Select top events per year
     df = select_top_events_by_year(df, args.top_k)
+    
+    # Enforce minimum separation between all events
+    df = enforce_minimum_separation(df)
     
     # Validate results
     validate_results(df, args.top_k)
